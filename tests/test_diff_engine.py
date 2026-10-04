@@ -240,6 +240,39 @@ class TestCompareDirs(unittest.TestCase):
         self.assertNotIn("._apple.txt", statuses)
         self.assertNotIn(".DS_Store", statuses)
 
+    def test_renamed_files_paired(self):
+        (self.left / "report copy.txt").write_text("a\nb\n")
+        (self.right / "report cop.txt").write_text("a\nc\n")
+        entries = de.compare_dirs(self.left, self.right)
+        by_status = self._statuses(entries)
+        self.assertEqual(by_status.get("report copy.txt"), de.DIFFERENT)
+        self.assertNotIn("report cop.txt", by_status)
+        e = next(e for e in entries if e.relpath == "report copy.txt")
+        self.assertEqual(e.pair, "report cop.txt")
+        self.assertEqual(e.left_path.name, "report copy.txt")
+        self.assertEqual(e.right_path.name, "report cop.txt")
+
+    def test_different_names_not_paired(self):
+        (self.left / "budget.txt").write_text("x")
+        (self.right / "summary.txt").write_text("x")
+        statuses = self._statuses(de.compare_dirs(self.left, self.right))
+        self.assertEqual(statuses["budget.txt"], de.LEFT_ONLY)
+        self.assertEqual(statuses["summary.txt"], de.RIGHT_ONLY)
+
+    def test_renamed_pair_requires_same_extension(self):
+        (self.left / "notes.txt").write_text("x")
+        (self.right / "notes.docx").write_bytes(b"PK\x03\x04fake")
+        statuses = self._statuses(de.compare_dirs(self.left, self.right))
+        self.assertEqual(statuses["notes.txt"], de.LEFT_ONLY)
+        self.assertEqual(statuses["notes.docx"], de.RIGHT_ONLY)
+
+    def test_renamed_pair_identical_content(self):
+        (self.left / "doc copy.txt").write_text("same\n")
+        (self.right / "doc cop.txt").write_text("same\n")
+        e = next(e for e in de.compare_dirs(self.left, self.right)
+                 if e.relpath == "doc copy.txt")
+        self.assertEqual(e.status, de.IDENTICAL)
+
     def test_binary_files(self):
         (self.left / "a.bin").write_bytes(b"\x00\x01")
         (self.right / "a.bin").write_bytes(b"\x00\x02")

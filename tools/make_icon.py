@@ -68,31 +68,31 @@ def main():
                 if pred(x, y):
                     px[y][x] = color
 
-    # tile
-    paint(BG, lambda x, y: in_rounded(x, y, 0, 0, SIZE - 1, SIZE - 1, RADIUS))
+    # tile — inset ~10% like a macOS Dock icon, not edge-to-edge
+    paint(BG, lambda x, y: in_rounded(x, y, 6, 6, 57, 57, 12))
 
     # document page with the top-right corner folded over
-    fold = 9
-    in_fold = lambda x, y: (x >= 44 - fold and y <= 8 + fold and x <= 44
-                            and y >= 8
-                            and (x - (44 - fold)) + (8 + fold - y) <= fold)
+    fold = 7
+    in_fold = lambda x, y: (x >= 42 - fold and y <= 14 + fold and x <= 42
+                            and y >= 14
+                            and (x - (42 - fold)) + (14 + fold - y) <= fold)
     paint(PANE, lambda x, y:
-          in_rounded(x, y, 14, 8, 44, 50, 3) and not in_fold(x, y))
+          in_rounded(x, y, 18, 14, 42, 46, 2) and not in_fold(x, y))
     paint(FOLD, in_fold)
     # text lines on the page
     paint(MUTED, lambda x, y:
-          18 <= x <= 36 and ((18 <= y <= 20) or (24 <= y <= 26) or (30 <= y <= 32)))
-    paint(MUTED, lambda x, y: 18 <= x <= 30 and 36 <= y <= 38)
+          21 <= x <= 35 and ((22 <= y <= 24) or (28 <= y <= 30) or (34 <= y <= 36)))
+    paint(MUTED, lambda x, y: 21 <= x <= 29 and 40 <= y <= 42)
 
     # magnifying glass over the page's lower-right
-    cx, cy, r_out, r_in = 39, 37, 12, 8.5
+    cx, cy, r_out, r_in = 36, 36, 10.5, 7.5
     paint(GLASS, lambda x, y:
           r_in <= math.hypot(x - cx, y - cy) <= r_out)
     # lens interior: subtle tint
     paint((120, 160, 250, 160), lambda x, y: math.hypot(x - cx, y - cy) < r_in)
     # handle
     hx0, hy0 = cx + r_out - 3, cy + r_out - 3
-    paint(GLASS, lambda x, y: _seg_dist(x, y, hx0, hy0, 55, 55) <= 3)
+    paint(GLASS, lambda x, y: _seg_dist(x, y, hx0, hy0, 51, 51) <= 2.5)
 
     out = Path(__file__).resolve().parent.parent / "icon.png"
     write_png(out, SIZE, SIZE, px)

@@ -80,6 +80,7 @@ class DirEntry:
     is_dir: bool
     left_path: Path | None
     right_path: Path | None
+    pair: str | None = None  # right relpath when filenames differ (renamed/copy)
 
 
 def is_binary(path: Path) -> bool:
@@ -459,6 +460,56 @@ def _scan(root: Path, recursive: bool) -> dict[str, Path]:
     return result
 
 
+# Minimum filename similarity to pair a left-only file with a right-only file
+# (catches renamed/"cop" vs "copy" style duplicates). Requires same extension.
+_RENAMED_THRESHOLD = 0.8
+
+
+def _pair_renamed(left_rels: set[str], right_rels: set[str],
+                  left_map: dict[str, Path],
+                  right_map: dict[str, Path]) -> list[tuple[str, str]]:
+    """Greedily pair one-sided files whose names are very similar."""
+    cands = []
+    for lrel in left_rels:
+        lp = left_map[lrel]
+        if not lp.is_file():
+            continue
+        lname = lp.stem.lower()  # stem: don't let the shared extension inflate the score
+        for rrel in right_rels:
+            rp = right_map[rrel]
+            if (not rp.is_file()
+                    or lp.suffix.lower() != rp.suffix.lower()):
+                continue
+            ratio = difflib.SequenceMatcher(
+                None, lname, rp.stem.lower()).ratio()
+            if ratio >= _RENAMED_THRESHOLD:
+                cands.append((ratio, lrel, rrel))
+    cands.sort(key=lambda c: -c[0])
+    used_l: set[str] = set()
+    used_r: set[str] = set()
+    pairs = []
+    for _, lrel, rrel in cands:
+        if lrel not in used_l and rrel not in used_r:
+            used_l.add(lrel)
+            used_r.add(rrel)
+            pairs.append((lrel, rrel))
+    return pairs
+
+
+def _file_status(lp: Path, rp: Path, options: DiffOptions) -> str:
+    try:
+        if (extract_document_lines(lp) is not None
+                and extract_document_lines(rp) is not None):
+            return (IDENTICAL if compare_files(lp, rp, options).identical
+                    else DIFFERENT)
+        if is_binary(lp) or is_binary(rp):
+            return IDENTICAL if lp.read_bytes() == rp.read_bytes() else BINARY
+        return (IDENTICAL if compare_files(lp, rp, options).identical
+                else DIFFERENT)
+    except OSError:
+        return ERROR
+
+
 def compare_dirs(left_dir, right_dir,
                  options: DiffOptions | None = None) -> list[DirEntry]:
     options = options or DiffOptions()
@@ -466,27 +517,33 @@ def compare_dirs(left_dir, right_dir,
     left_map = _scan(left_dir, options.recursive)
     right_map = _scan(right_dir, options.recursive)
 
+    names = set(left_map) | set(right_map)
+    only_l = {r for r in names if r in left_map and r not in right_map}
+    only_r = {r for r in names if r not in left_map and r in right_map}
+    pairs = _pair_renamed(only_l, only_r, left_map, right_map)
+    pair_of = dict(pairs)
+    paired_r = {r for _, r in pairs}
+
     entries: list[DirEntry] = []
-    for rel in sorted(set(left_map) | set(right_map)):
+    for rel in sorted(names):
         lp, rp = left_map.get(rel), right_map.get(rel)
         if lp is None:
+            if rel in paired_r:
+                continue  # reported on its left partner's entry
             entries.append(DirEntry(rel, RIGHT_ONLY, rp.is_dir(), None, rp))
         elif rp is None:
-            entries.append(DirEntry(rel, LEFT_ONLY, lp.is_dir(), lp, None))
+            if rel in pair_of:
+                rrel = pair_of[rel]
+                rp2 = right_map[rrel]
+                entries.append(DirEntry(
+                    rel, _file_status(lp, rp2, options), False, lp, rp2,
+                    pair=rrel))
+            else:
+                entries.append(DirEntry(rel, LEFT_ONLY, lp.is_dir(), lp, None))
         elif lp.is_dir() or rp.is_dir():
             status = IDENTICAL if lp.is_dir() == rp.is_dir() else TYPE_MISMATCH
             entries.append(DirEntry(rel, status, lp.is_dir(), lp, rp))
         else:
-            try:
-                office = (extract_document_lines(lp) is not None
-                          and extract_document_lines(rp) is not None)
-                if office:
-                    status = IDENTICAL if compare_files(lp, rp, options).identical else DIFFERENT
-                elif is_binary(lp) or is_binary(rp):
-                    status = IDENTICAL if lp.read_bytes() == rp.read_bytes() else BINARY
-                else:
-                    status = IDENTICAL if compare_files(lp, rp, options).identical else DIFFERENT
-            except OSError:
-                status = ERROR
-            entries.append(DirEntry(rel, status, False, lp, rp))
+            entries.append(DirEntry(rel, _file_status(lp, rp, options),
+                                    False, lp, rp))
     return entries

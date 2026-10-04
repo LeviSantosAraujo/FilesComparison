@@ -254,7 +254,9 @@ class FolderTree(QTreeWidget):
         for entry in entries:
             counts[entry.status] = counts.get(entry.status, 0) + 1
             parts = entry.relpath.split("/")
-            item = QTreeWidgetItem([parts[-1],
+            name = (f"{parts[-1]} ↔ {entry.pair.rsplit('/', 1)[-1]}"
+                    if entry.pair else parts[-1])
+            item = QTreeWidgetItem([name,
                                     STATUS_LABELS.get(entry.status, entry.status),
                                     "Folder" if entry.is_dir else "File"])
             item.setData(0, Qt.ItemDataRole.UserRole, entry)
