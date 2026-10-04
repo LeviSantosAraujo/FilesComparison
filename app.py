@@ -1,4 +1,4 @@
-"""File & folder comparison tool — tkinter GUI.
+"""Files Comparison — PySide6 GUI.
 
 Run: python3 app.py
 """
@@ -6,11 +6,18 @@ Run: python3 app.py
 from __future__ import annotations
 
 import logging
-import queue
-import threading
-import tkinter as tk
+import sys
 from pathlib import Path
-from tkinter import filedialog, messagebox, ttk
+
+from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtGui import QColor, QFont, QIcon
+from PySide6.QtWidgets import (
+    QAbstractItemView, QApplication, QCheckBox, QFileDialog, QHBoxLayout,
+    QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
+    QStackedWidget, QTableWidget, QTableWidgetItem, QTreeWidget,
+    QTreeWidgetItem, QVBoxLayout, QWidget)
+
+import diff_engine as de
 
 LOG_PATH = Path(__file__).resolve().parent / "files_comparison.log"
 logging.basicConfig(
@@ -21,22 +28,14 @@ logging.basicConfig(
 log = logging.getLogger("files_comparison")
 log.info("=== app module loaded, log file: %s ===", LOG_PATH)
 
-import diff_engine as de
-
 # --- visual theme ---------------------------------------------------------
-BG = "#eef0f4"          # window background
-CARD = "#ffffff"        # panels / content surfaces
+BG = "#eef0f4"
+CARD = "#ffffff"
 BORDER = "#d9dde3"
 TEXT = "#1f2328"
 MUTED = "#65707e"
 ACCENT = "#2f6df6"
 ACCENT_DK = "#1f56d8"
-
-FONT_UI = ("", 12)
-FONT_BOLD = ("", 13, "bold")
-FONT_TITLE = ("", 16, "bold")
-FONT_MONO = ("Menlo", 12)
-GUTTER_WIDTH = 6
 
 ROW_COLORS = {
     de.CHANGED: "#fff2c4",
@@ -49,7 +48,7 @@ GUTTER_BG = "#f7f8fa"
 GUTTER_FG = "#a0a8b4"
 
 STATUS_COLORS = {
-    de.IDENTICAL: "",
+    de.IDENTICAL: None,
     de.DIFFERENT: "#fff2c4",
     de.LEFT_ONLY: "#dce9fd",
     de.RIGHT_ONLY: "#d5f2db",
@@ -68,421 +67,462 @@ STATUS_LABELS = {
     de.ERROR: "Error",
 }
 
-
-def _apply_style(root: tk.Misc):
-    style = ttk.Style(root)
-    style.theme_use("clam")
-    style.configure(".", background=BG, foreground=TEXT, font=FONT_UI,
-                    fieldbackground=CARD, bordercolor=BORDER)
-    style.configure("TFrame", background=BG)
-    style.configure("TLabel", background=BG, foreground=TEXT)
-    style.configure("Title.TLabel", font=FONT_TITLE)
-    style.configure("Muted.TLabel", foreground=MUTED)
-    style.configure("Status.TLabel", foreground=MUTED, font=("", 11))
-    style.configure("Panel.TLabel", background=CARD, font=FONT_BOLD)
-    style.configure("TButton", padding=(12, 5))
-    style.configure("Accent.TButton", background=ACCENT, foreground="white",
-                    borderwidth=0, focuscolor=ACCENT)
-    style.map("Accent.TButton",
-              background=[("pressed", ACCENT_DK), ("active", ACCENT_DK)],
-              foreground=[("disabled", "#ffffff")])
-    style.configure("TCheckbutton", background=BG)
-    style.map("TCheckbutton", background=[("active", BG)])
-    style.configure("TEntry", padding=5)
-    style.configure("Treeview", background=CARD, fieldbackground=CARD,
-                    borderwidth=0, rowheight=26)
-    style.configure("Treeview.Heading", font=FONT_BOLD, padding=(8, 6),
-                    background=BG)
-    style.configure("TScrollbar", background=BG, troughcolor=BG,
-                    borderwidth=0, arrowcolor=MUTED)
-    root.option_add("*Text.selectBackground", "#b9d2fb")
-
-
-class DiffView(ttk.Frame):
-    """Side-by-side diff: line-number gutter + text pane per side, synced scrolling."""
-
-    def __init__(self, master):
-        super().__init__(master)
-        self.left_gutter = tk.Text(self, width=GUTTER_WIDTH, wrap="none",
-                                   font=FONT_MONO, bg=GUTTER_BG, fg=GUTTER_FG,
-                                   bd=0, takefocus=0, cursor="arrow")
-        self.right_gutter = tk.Text(self, width=GUTTER_WIDTH, wrap="none",
-                                    font=FONT_MONO, bg=GUTTER_BG, fg=GUTTER_FG,
-                                    bd=0, takefocus=0, cursor="arrow")
-        for g in (self.left_gutter, self.right_gutter):
-            g.tag_configure("num", justify="right")
-        self.left_text = tk.Text(self, wrap="none", font=FONT_MONO, bd=0,
-                                 bg=CARD, undo=False, spacing1=1, spacing3=1)
-        self.right_text = tk.Text(self, wrap="none", font=FONT_MONO, bd=0,
-                                  bg=CARD, undo=False, spacing1=1, spacing3=1)
-        self._widgets = (self.left_gutter, self.left_text,
-                         self.right_gutter, self.right_text)
-
-        vsb = ttk.Scrollbar(self, orient="vertical", command=self._yview)
-        hsb = ttk.Scrollbar(self, orient="horizontal", command=self._xview)
-        for w in self._widgets:
-            w.configure(yscrollcommand=vsb.set, xscrollcommand=hsb.set,
-                        padx=4, highlightthickness=0)
-            w.bind("<MouseWheel>", self._on_wheel)
-            for kind, color in ROW_COLORS.items():
-                w.tag_configure(kind, background=color)
-            w.tag_configure("pad", background=PAD_BG)
-
-        sep = tk.Frame(self, width=1, bg=BORDER)
-        self.left_gutter.grid(row=0, column=0, sticky="ns")
-        self.left_text.grid(row=0, column=1, sticky="nsew")
-        sep.grid(row=0, column=2, sticky="ns")
-        self.right_gutter.grid(row=0, column=3, sticky="ns")
-        self.right_text.grid(row=0, column=4, sticky="nsew")
-        vsb.grid(row=0, column=5, sticky="ns")
-        hsb.grid(row=1, column=0, columnspan=6, sticky="ew")
-        self.status = ttk.Label(self, anchor="w", style="Status.TLabel")
-        self.status.grid(row=2, column=0, columnspan=6, sticky="ew",
-                         padx=6, pady=(2, 0))
-        self.columnconfigure(1, weight=1)
-        self.columnconfigure(4, weight=1)
-        self.rowconfigure(0, weight=1)
-
-    def _yview(self, *args):
-        for w in self._widgets:
-            w.yview(*args)
-
-    def _xview(self, *args):
-        for w in (self.left_text, self.right_text):
-            w.xview(*args)
-
-    def _on_wheel(self, event):
-        delta = -1 if event.delta > 0 else 1
-        for w in self._widgets:
-            w.yview_scroll(delta, "units")
-        return "break"
-
-    def show_result(self, result: de.FileResult):
-        for w in self._widgets:
-            w.configure(state="normal")
-            w.delete("1.0", "end")
-
-        for row in result.rows:
-            for gutter, pane, cell in (
-                (self.left_gutter, self.left_text, row.left),
-                (self.right_gutter, self.right_text, row.right),
-            ):
-                if cell is None:
-                    gutter.insert("end", "\n", ("num", "pad"))
-                    pane.insert("end", "\n", "pad")
-                else:
-                    gutter.insert("end", f"{cell.lineno}\n", ("num", cell.kind))
-                    pane.insert("end", cell.text + "\n", cell.kind)
-
-        for w in self._widgets:
-            w.configure(state="disabled")
-            w.yview_moveto(0)
-
-        prefix = (result.note + " — ") if result.note else ""
-        if result.identical:
-            self.status.configure(text=prefix + "Files are identical")
-        else:
-            s = result.summary
-            parts = [f"{s.get(k, 0)} {k}" for k in (de.CHANGED, de.ADDED, de.REMOVED) if s.get(k)]
-            if s.get(de.BLANK):
-                parts.append(f"{s[de.BLANK]} blank (ignored)")
-            self.status.configure(text=prefix + "Differences: " + ", ".join(parts))
-
-
-class FolderView(ttk.Frame):
-    """Treeview of compare_dirs results; double-click a differing file to open a diff."""
-
-    def __init__(self, master, on_open_file):
-        super().__init__(master)
-        self._on_open_file = on_open_file
-        self._entries: dict[str, de.DirEntry] = {}
-
-        cols = ("status", "side")
-        self.tree = ttk.Treeview(self, columns=cols, show="tree headings")
-        self.tree.heading("#0", text="Path")
-        self.tree.heading("status", text="Status")
-        self.tree.heading("side", text="Type")
-        self.tree.column("#0", width=500)
-        self.tree.column("status", width=120, anchor="center")
-        self.tree.column("side", width=90, anchor="center")
-        for status, color in STATUS_COLORS.items():
-            if color:
-                self.tree.tag_configure(status, background=color)
-
-        vsb = ttk.Scrollbar(self, orient="vertical", command=self.tree.yview)
-        self.tree.configure(yscrollcommand=vsb.set)
-        self.tree.grid(row=0, column=0, sticky="nsew")
-        vsb.grid(row=0, column=1, sticky="ns")
-        self.rowconfigure(0, weight=1)
-        self.columnconfigure(0, weight=1)
-
-        self.status = ttk.Label(self, anchor="w", style="Status.TLabel")
-        self.status.grid(row=1, column=0, columnspan=2, sticky="ew",
-                         padx=4, pady=(4, 0))
-        self.tree.bind("<Double-1>", self._on_double_click)
-
-    def show_entries(self, entries: list[de.DirEntry]):
-        self.tree.delete(*self.tree.get_children())
-        self._entries.clear()
-        counts: dict[str, int] = {}
-
-        # entries are sorted by relpath, so parents always precede their children
-        for entry in entries:
-            counts[entry.status] = counts.get(entry.status, 0) + 1
-            parent = entry.relpath.rsplit("/", 1)[0] if "/" in entry.relpath else ""
-            iid = self.tree.insert(parent, "end", iid=entry.relpath,
-                                   text=entry.relpath.split("/")[-1],
-                                   values=(STATUS_LABELS.get(entry.status, entry.status),
-                                           "Folder" if entry.is_dir else "File"),
-                                   tags=(entry.status,))
-            self._entries[iid] = entry
-
-        parts = [f"{counts[k]} {STATUS_LABELS.get(k, k).lower()}"
-                 for k in (de.DIFFERENT, de.LEFT_ONLY, de.RIGHT_ONLY, de.BINARY,
-                           de.TYPE_MISMATCH, de.ERROR) if counts.get(k)]
-        total = len(entries)
-        self.status.configure(
-            text=f"{total} items — " + (", ".join(parts) if parts else "all identical")
-            + "   (double-click a different file to view its diff)")
-
-    def _on_double_click(self, event):
-        iid = self.tree.identify_row(event.y)
-        entry = self._entries.get(iid)
-        if entry and entry.status in (de.DIFFERENT, de.BINARY):
-            self._on_open_file(entry)
-
-
-class SidePanel(tk.Frame):
-    """Half-width card with a title, path entry and browse buttons."""
-
-    def __init__(self, master, app, title, var):
-        super().__init__(master, bg=CARD, padx=10, pady=8,
-                         highlightthickness=1, highlightbackground=BORDER)
-        self.var = var
-        tk.Label(self, text=title, bg=CARD, fg=MUTED,
-                 font=("", 10, "bold")).pack(anchor="w")
-
-        row = tk.Frame(self, bg=CARD)
-        row.pack(fill="x", pady=(4, 0))
-        self.entry = ttk.Entry(row, textvariable=var)
-        self.entry.pack(side="left", fill="x", expand=True)
-        ttk.Button(row, text="File…", width=7,
-                   command=lambda: app._pick(var, False)).pack(side="left", padx=(4, 2))
-        ttk.Button(row, text="Folder…", width=8,
-                   command=lambda: app._pick(var, True)).pack(side="left")
-
-
 ICON_PATH = Path(__file__).resolve().parent / "icon.png"
 
+QSS = f"""
+QMainWindow, QWidget {{
+    background: {BG};
+    color: {TEXT};
+    font-size: 13px;
+}}
+QLabel#brand {{ font-size: 18px; font-weight: bold; }}
+QLabel#tagline {{ color: {MUTED}; font-size: 12px; }}
+QLabel#status {{ color: {MUTED}; font-size: 11px; padding: 2px; }}
+QLabel#panelTitle {{ color: {MUTED}; font-size: 10px; font-weight: bold; }}
+#card {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+}}
+QLineEdit {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    padding: 6px 8px;
+    selection-background-color: #b9d2fb;
+}}
+QLineEdit:focus {{ border-color: {ACCENT}; }}
+QPushButton {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    padding: 6px 14px;
+}}
+QPushButton:hover {{ background: #f0f2f6; }}
+QPushButton:pressed {{ background: #e4e8ee; }}
+QPushButton:disabled {{ color: {MUTED}; }}
+QPushButton#accent {{
+    background: {ACCENT};
+    color: white;
+    border: none;
+    font-weight: bold;
+}}
+QPushButton#accent:hover {{ background: {ACCENT_DK}; }}
+QPushButton#accent:pressed {{ background: {ACCENT_DK}; }}
+QPushButton#accent:disabled {{ background: #9db8f5; }}
+QCheckBox {{ spacing: 6px; }}
+QTableWidget, QTreeWidget {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 8px;
+    gridline-color: transparent;
+    selection-background-color: #dbe7fd;
+    selection-color: {TEXT};
+}}
+QTableWidget::item {{ padding: 0px 6px; }}
+QTreeWidget::item {{ padding: 4px 2px; }}
+QHeaderView::section {{
+    background: {GUTTER_BG};
+    color: {MUTED};
+    border: none;
+    border-bottom: 1px solid {BORDER};
+    padding: 6px;
+    font-weight: bold;
+}}
+QScrollBar:vertical {{ background: transparent; width: 12px; margin: 2px; }}
+QScrollBar::handle:vertical {{
+    background: #c4cad3; border-radius: 5px; min-height: 30px;
+}}
+QScrollBar::handle:vertical:hover {{ background: #a8b0bc; }}
+QScrollBar:horizontal {{ background: transparent; height: 12px; margin: 2px; }}
+QScrollBar::handle:horizontal {{
+    background: #c4cad3; border-radius: 5px; min-width: 30px;
+}}
+QScrollBar::handle:horizontal:hover {{ background: #a8b0bc; }}
+QScrollBar::add-line, QScrollBar::sub-line {{ height: 0; width: 0; }}
+"""
 
-def _load_icon(root: tk.Misc):
-    try:
-        if ICON_PATH.exists():
-            img = tk.PhotoImage(file=str(ICON_PATH))
-            root.iconphoto(True, img)   # True = applies to future Toplevels too
-            return img
-    except tk.TclError:
-        log.exception("failed to load icon %s", ICON_PATH)
-    return None
+
+def mono_font() -> QFont:
+    f = QFont("Menlo")
+    f.setStyleHint(QFont.StyleHint.TypeWriter)
+    f.setPointSize(12)
+    return f
 
 
-def _maximize(win: tk.Misc):
-    """Fill the screen without entering native fullscreen."""
-    try:
-        win.state("zoomed")  # Windows / most X11 WMs
-    except tk.TclError:
-        w = win.winfo_screenwidth()
-        h = win.winfo_screenheight()
-        win.geometry(f"{w}x{h}+0+0")  # macOS
+class CompareThread(QThread):
+    """Runs the engine off the UI thread."""
+    done = Signal(str, object)  # kind ("file"|"dirs"|"error"), result
+
+    def __init__(self, left: Path, right: Path, options: de.DiffOptions):
+        super().__init__()
+        self.left, self.right, self.options = left, right, options
+
+    def run(self):
+        try:
+            if self.left.is_dir():
+                self.done.emit("dirs", de.compare_dirs(self.left, self.right,
+                                                       self.options))
+            else:
+                self.done.emit("file", de.compare_files(self.left, self.right,
+                                                        self.options))
+        except Exception:
+            log.exception("compare worker failed")
+            self.done.emit("error", None)
 
 
-class CompareApp(tk.Tk):
+class DiffTable(QTableWidget):
+    """Side-by-side diff: [# | left text | # | right text] in one table."""
+
     def __init__(self):
         super().__init__()
-        self.title("Files Comparison")
-        _maximize(self)
-        self.configure(bg=BG)
-        _apply_style(self)
-        self._icon = _load_icon(self)
-        self._queue: queue.Queue = queue.Queue()
-        log.info("app init: Tk %s", tk.TkVersion)
+        self.setColumnCount(4)
+        self.setHorizontalHeaderLabels(["", "Left", "", "Right"])
+        self.verticalHeader().setVisible(False)
+        self.verticalHeader().setDefaultSectionSize(22)
+        h = self.horizontalHeader()
+        h.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        h.setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        h.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        h.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)
+        self.setEditTriggers(QAbstractItemView.EditTrigger.NoEditTriggers)
+        self.setSelectionMode(QAbstractItemView.SelectionMode.NoSelection)
+        self.setShowGrid(False)
+        self.setFont(mono_font())
 
-        brand = ttk.Frame(self, padding=(12, 12, 12, 2))
-        brand.pack(fill="x")
-        ttk.Label(brand, text="Files Comparison",
-                  style="Title.TLabel").pack(side="left")
-        ttk.Label(brand, text="side-by-side diff for files & folders",
-                  style="Muted.TLabel").pack(side="left", padx=10, pady=(4, 0))
+    def show_result(self, result: de.FileResult):
+        self.setRowCount(0)
+        self.setRowCount(len(result.rows))
+        for i, row in enumerate(result.rows):
+            for num_col, txt_col, cell in ((0, 1, row.left), (2, 3, row.right)):
+                num = QTableWidgetItem("" if cell is None else str(cell.lineno))
+                num.setTextAlignment(Qt.AlignmentFlag.AlignRight
+                                     | Qt.AlignmentFlag.AlignVCenter)
+                num.setForeground(QColor(GUTTER_FG))
+                num.setBackground(QColor(GUTTER_BG))
+                txt = QTableWidgetItem("" if cell is None else cell.text)
+                bg = PAD_BG if cell is None else ROW_COLORS.get(cell.kind)
+                if bg:
+                    num.setBackground(QColor(bg))
+                    txt.setBackground(QColor(bg))
+                else:
+                    txt.setBackground(QColor(CARD))
+                self.setItem(i, num_col, num)
+                self.setItem(i, txt_col, txt)
+        self.scrollToTop()
 
-        self.left_var = tk.StringVar()
-        self.right_var = tk.StringVar()
 
-        panels = ttk.Frame(self, padding=(12, 4, 12, 0))
-        panels.pack(fill="x")
-        panels.columnconfigure(0, weight=1)
-        panels.columnconfigure(1, weight=1)
-        self.left_panel = SidePanel(panels, self, "LEFT", self.left_var)
-        self.left_panel.grid(row=0, column=0, sticky="nsew", padx=(0, 4))
-        self.right_panel = SidePanel(panels, self, "RIGHT", self.right_var)
-        self.right_panel.grid(row=0, column=1, sticky="nsew", padx=(4, 0))
+class DiffWindow(QMainWindow):
+    """Standalone window showing one file comparison."""
 
-        opts = ttk.Frame(self, padding=(12, 8, 12, 8))
-        opts.pack(fill="x")
-        self.opt_ws = tk.BooleanVar()
-        self.opt_case = tk.BooleanVar()
-        self.opt_blank = tk.BooleanVar()
-        self.opt_recursive = tk.BooleanVar(value=True)
-        ttk.Checkbutton(opts, text="Ignore whitespace", variable=self.opt_ws).pack(side="left")
-        ttk.Checkbutton(opts, text="Ignore case", variable=self.opt_case).pack(side="left", padx=8)
-        ttk.Checkbutton(opts, text="Ignore blank lines", variable=self.opt_blank).pack(side="left")
-        ttk.Checkbutton(opts, text="Include subfolders", variable=self.opt_recursive).pack(side="left", padx=8)
-        self.compare_btn = ttk.Button(opts, text="Compare", style="Accent.TButton",
-                                      command=self.compare)
-        self.compare_btn.pack(side="right")
+    def __init__(self, title: str):
+        super().__init__()
+        self.setWindowTitle(title)
+        if ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(ICON_PATH)))
+        central = QWidget()
+        lay = QVBoxLayout(central)
+        lay.setContentsMargins(12, 12, 12, 8)
+        self.table = DiffTable()
+        lay.addWidget(self.table, stretch=1)
+        self.status = QLabel()
+        self.status.setObjectName("status")
+        lay.addWidget(self.status)
+        self.setCentralWidget(central)
 
-        self.content = ttk.Frame(self)
-        self.content.pack(fill="both", expand=True, padx=12, pady=(0, 10))
-        self._content_widget = None
-        self._show_hint()
 
-    def _diff_options(self) -> de.DiffOptions:
-        return de.DiffOptions(
-            ignore_whitespace=self.opt_ws.get(),
-            ignore_case=self.opt_case.get(),
-            ignore_blank_lines=self.opt_blank.get(),
-            recursive=self.opt_recursive.get())
+class FolderTree(QTreeWidget):
+    """Treeview of compare_dirs results; double-click a file to open a diff."""
 
-    def _pick(self, var: tk.StringVar, is_dir: bool):
-        side = "left" if var is self.left_var else "right"
-        log.info("browse clicked: %s %s", side, "folder" if is_dir else "file")
-        # macOS: the native dialog can open behind this window — pin it on top
-        self.attributes("-topmost", True)
-        try:
-            if is_dir:
-                path = filedialog.askdirectory(parent=self)
+    file_activated = Signal(object)  # de.DirEntry
+
+    def __init__(self):
+        super().__init__()
+        self.setColumnCount(3)
+        self.setHeaderLabels(["Name", "Status", "Type"])
+        self.setColumnWidth(0, 560)
+        self.setColumnWidth(1, 140)
+        self.setIndentation(16)
+        self.itemDoubleClicked.connect(self._emit_entry)
+
+    def show_entries(self, entries: list[de.DirEntry]):
+        self.clear()
+        nodes: dict[str, QTreeWidgetItem] = {}
+        counts: dict[str, int] = {}
+
+        # entries are sorted by relpath, so parents always precede children
+        for entry in entries:
+            counts[entry.status] = counts.get(entry.status, 0) + 1
+            parts = entry.relpath.split("/")
+            item = QTreeWidgetItem([parts[-1],
+                                    STATUS_LABELS.get(entry.status, entry.status),
+                                    "Folder" if entry.is_dir else "File"])
+            item.setData(0, Qt.ItemDataRole.UserRole, entry)
+            color = STATUS_COLORS.get(entry.status)
+            if color:
+                for c in range(3):
+                    item.setBackground(c, QColor(color))
+            parent_path = entry.relpath.rsplit("/", 1)[0] if "/" in entry.relpath else ""
+            if parent_path and parent_path in nodes:
+                nodes[parent_path].addChild(item)
             else:
-                path = filedialog.askopenfilename(parent=self)
-        finally:
-            self.attributes("-topmost", False)
+                self.addTopLevelItem(item)
+            nodes[entry.relpath] = item
+        self.expandAll()
+
+        parts_ = [f"{counts[k]} {STATUS_LABELS.get(k, k).lower()}"
+                  for k in (de.DIFFERENT, de.LEFT_ONLY, de.RIGHT_ONLY,
+                            de.BINARY, de.TYPE_MISMATCH, de.ERROR)
+                  if counts.get(k)]
+        return f"{len(entries)} items — " + (
+            ", ".join(parts_) if parts_ else "all identical")
+
+    def _emit_entry(self, item: QTreeWidgetItem, _col):
+        entry = item.data(0, Qt.ItemDataRole.UserRole)
+        log.info("tree double-click: %r", entry)
+        if (entry and not entry.is_dir
+                and entry.left_path and entry.right_path):
+            self.file_activated.emit(entry)
+
+
+class SidePanel(QWidget):
+    """Half-width card: title, path field, File…/Folder… buttons."""
+
+    def __init__(self, title: str, edit: QLineEdit,
+                 on_file, on_folder):
+        super().__init__()
+        self.setObjectName("card")
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.edit = edit
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(10, 8, 10, 10)
+        lay.setSpacing(6)
+        title_lbl = QLabel(title)
+        title_lbl.setObjectName("panelTitle")
+        lay.addWidget(title_lbl)
+        row = QHBoxLayout()
+        row.setSpacing(6)
+        row.addWidget(edit, stretch=1)
+        file_btn = QPushButton("File…")
+        file_btn.clicked.connect(on_file)
+        folder_btn = QPushButton("Folder…")
+        folder_btn.clicked.connect(on_folder)
+        row.addWidget(file_btn)
+        row.addWidget(folder_btn)
+        lay.addLayout(row)
+
+
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Files Comparison")
+        if ICON_PATH.exists():
+            self.setWindowIcon(QIcon(str(ICON_PATH)))
+        self._worker: CompareThread | None = None
+        self._diff_windows: list[DiffWindow] = []
+
+        central = QWidget()
+        root = QVBoxLayout(central)
+        root.setContentsMargins(12, 12, 12, 10)
+        root.setSpacing(8)
+
+        brand_row = QHBoxLayout()
+        brand = QLabel("Files Comparison")
+        brand.setObjectName("brand")
+        tagline = QLabel("side-by-side diff for files & folders")
+        tagline.setObjectName("tagline")
+        brand_row.addWidget(brand)
+        brand_row.addWidget(tagline)
+        brand_row.addStretch()
+        root.addLayout(brand_row)
+
+        self.left_edit = QLineEdit()
+        self.right_edit = QLineEdit()
+        self.left_edit.setPlaceholderText("Path to left file or folder")
+        self.right_edit.setPlaceholderText("Path to right file or folder")
+        panels = QHBoxLayout()
+        panels.setSpacing(8)
+        panels.addWidget(SidePanel("LEFT", self.left_edit,
+                                   lambda: self._pick(self.left_edit, False),
+                                   lambda: self._pick(self.left_edit, True)))
+        panels.addWidget(SidePanel("RIGHT", self.right_edit,
+                                   lambda: self._pick(self.right_edit, False),
+                                   lambda: self._pick(self.right_edit, True)))
+        root.addLayout(panels)
+
+        opts = QHBoxLayout()
+        opts.setSpacing(14)
+        self.opt_ws = QCheckBox("Ignore whitespace")
+        self.opt_case = QCheckBox("Ignore case")
+        self.opt_blank = QCheckBox("Ignore blank lines")
+        self.opt_recursive = QCheckBox("Include subfolders")
+        self.opt_recursive.setChecked(True)
+        for cb in (self.opt_ws, self.opt_case, self.opt_blank, self.opt_recursive):
+            opts.addWidget(cb)
+        opts.addStretch()
+        self.compare_btn = QPushButton("Compare")
+        self.compare_btn.setObjectName("accent")
+        self.compare_btn.clicked.connect(self.compare)
+        opts.addWidget(self.compare_btn)
+        root.addLayout(opts)
+
+        self.stack = QStackedWidget()
+        hint = QLabel("Pick a file or folder on each side above — "
+                      "the comparison runs automatically.")
+        hint.setObjectName("tagline")
+        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stack.addWidget(hint)                                   # 0
+        self.diff_table = DiffTable()
+        self.stack.addWidget(self.diff_table)                        # 1
+        folder_page = QWidget()
+        fp_lay = QVBoxLayout(folder_page)
+        fp_lay.setContentsMargins(0, 0, 0, 0)
+        fp_lay.setSpacing(4)
+        self.folder_tree = FolderTree()
+        self.folder_tree.file_activated.connect(self._open_file_diff)
+        self.folder_status = QLabel()
+        self.folder_status.setObjectName("status")
+        fp_lay.addWidget(self.folder_tree, stretch=1)
+        fp_lay.addWidget(self.folder_status)
+        self.stack.addWidget(folder_page)                            # 2
+        self.binary_lbl = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
+        self.binary_lbl.setObjectName("tagline")
+        self.stack.addWidget(self.binary_lbl)                        # 3
+        root.addWidget(self.stack, stretch=1)
+
+        self.status = QLabel()
+        self.status.setObjectName("status")
+        root.addWidget(self.status)
+
+        self.setCentralWidget(central)
+        log.info("app init: PySide6 %s", __import__("PySide6").__version__)
+
+    # -- actions -----------------------------------------------------------
+
+    def _options(self) -> de.DiffOptions:
+        return de.DiffOptions(
+            ignore_whitespace=self.opt_ws.isChecked(),
+            ignore_case=self.opt_case.isChecked(),
+            ignore_blank_lines=self.opt_blank.isChecked(),
+            recursive=self.opt_recursive.isChecked())
+
+    def _pick(self, edit: QLineEdit, is_dir: bool):
+        side = "left" if edit is self.left_edit else "right"
+        log.info("browse clicked: %s %s", side, "folder" if is_dir else "file")
+        if is_dir:
+            path = QFileDialog.getExistingDirectory(self, "Pick folder")
+        else:
+            path, _ = QFileDialog.getOpenFileName(self, "Pick file")
         log.info("picker returned: %r", path)
         if path:
-            var.set(path)
+            edit.setText(path)
             self._compare_if_ready()
 
     def _compare_if_ready(self):
-        log.debug("compare_if_ready: left=%r right=%r",
-                  self.left_var.get(), self.right_var.get())
-        if self.left_var.get() and self.right_var.get():
+        if self.left_edit.text() and self.right_edit.text():
             self.compare()
 
-    def _show_hint(self):
-        self._set_content(ttk.Label(
-            self.content,
-            text="Pick a file or folder on each side above — the comparison runs automatically.",
-            style="Muted.TLabel", anchor="center"))
-
-    def _set_content(self, widget):
-        if self._content_widget is not None:
-            self._content_widget.destroy()
-        self._content_widget = widget
-        widget.pack(fill="both", expand=True)
-
     def compare(self):
-        left, right = Path(self.left_var.get()), Path(self.right_var.get())
+        left = Path(self.left_edit.text().strip())
+        right = Path(self.right_edit.text().strip())
         log.info("compare: left=%s right=%s", left, right)
         if not left.exists() or not right.exists():
             log.warning("compare aborted: left.exists()=%s right.exists()=%s",
                         left.exists(), right.exists())
-            messagebox.showerror("Files Comparison", "Both paths must exist.")
+            QMessageBox.critical(self, "Files Comparison",
+                                 "Both paths must exist.")
             return
         if left.is_file() != right.is_file():
-            log.warning("compare aborted: left.is_file()=%s right.is_file()=%s",
-                        left.is_file(), right.is_file())
-            messagebox.showerror("Files Comparison",
+            QMessageBox.critical(self, "Files Comparison",
                                  "Pick two files or two folders — not one of each.")
             return
 
-        self.compare_btn.configure(state="disabled", text="Comparing…")
-        options = self._diff_options()
-        if left.is_dir():
-            work = lambda: ("dirs", de.compare_dirs(left, right, options))
-        else:
-            work = lambda: ("file", de.compare_files(left, right, options))
+        self.compare_btn.setEnabled(False)
+        self.compare_btn.setText("Comparing…")
+        self.status.setText("")
+        self._worker = CompareThread(left, right, self._options())
+        self._worker.done.connect(self._on_result)
+        self._worker.start()
 
-        def run():
-            try:
-                self._queue.put(work())
-            except Exception:
-                log.exception("compare worker failed")
-                self._queue.put(("error", None))
-        threading.Thread(target=run, daemon=True).start()
-        self.after(60, self._poll)
-
-    def _poll(self):
-        try:
-            kind, result = self._queue.get_nowait()
-        except queue.Empty:
-            self.after(60, self._poll)
-            return
-        self.compare_btn.configure(state="normal", text="Compare")
+    def _on_result(self, kind: str, result):
+        self.compare_btn.setEnabled(True)
+        self.compare_btn.setText("Compare")
         log.info("compare finished: kind=%s", kind)
 
         if kind == "error":
-            messagebox.showerror("Files Comparison",
+            QMessageBox.critical(self, "Files Comparison",
                                  "Comparison failed — see files_comparison.log")
-        elif kind == "dirs":
-            log.info("folder result: %d entries", len(result))
-            view = FolderView(self.content, self._open_file_diff)
-            view.show_entries(result)
-            self._set_content(view)
-        elif result.error:
-            log.warning("file compare error: %s", result.error)
-            messagebox.showerror("Files Comparison", result.error)
-        elif result.is_binary:
-            label = "Binary files are identical" if result.identical else "Binary files differ"
-            log.info("binary file result: identical=%s", result.identical)
-            self._set_content(ttk.Label(self.content, text=label, anchor="center"))
+            return
+        if kind == "dirs":
+            summary = self.folder_tree.show_entries(result)
+            self.folder_status.setText(summary)
+            self.status.setText("Double-click a file to view its diff")
+            self.stack.setCurrentIndex(2)
+            return
+
+        if result.error:
+            QMessageBox.critical(self, "Files Comparison", result.error)
+            return
+        if result.is_binary:
+            msg = ("Binary files are identical" if result.identical
+                   else "Binary files differ")
+            self.status.setText(msg)
+            self.binary_lbl.setText(msg)
+            self.stack.setCurrentIndex(3)
+            return
+
+        prefix = (result.note + " — ") if result.note else ""
+        if result.identical:
+            self.status.setText(prefix + "Files are identical")
         else:
-            log.info("file result: %d rows, identical=%s, summary=%s",
-                     len(result.rows), result.identical, result.summary)
-            view = DiffView(self.content)
-            view.show_result(result)
-            self._set_content(view)
+            s = result.summary
+            parts = [f"{s.get(k, 0)} {k}" for k in
+                     (de.CHANGED, de.ADDED, de.REMOVED) if s.get(k)]
+            if s.get(de.BLANK):
+                parts.append(f"{s[de.BLANK]} blank (ignored)")
+            self.status.setText(prefix + "Differences: " + ", ".join(parts))
+        self.diff_table.show_result(result)
+        self.stack.setCurrentIndex(1)
 
     def _open_file_diff(self, entry: de.DirEntry):
-        win = tk.Toplevel(self)
-        win.title(f"{entry.left_path.name} ↔ {entry.right_path.name}")
-        win.configure(bg=BG)
-        _maximize(win)
-        view = DiffView(win)
-        view.pack(fill="both", expand=True)
-        options = self._diff_options()
-        lp, rp = entry.left_path, entry.right_path
-        q: queue.Queue = queue.Queue()
+        win = DiffWindow(f"{entry.left_path.name} ↔ {entry.right_path.name}")
+        win.resize(1200, 800)
+        win.show()
+        self._diff_windows.append(win)  # keep a reference alive
 
-        threading.Thread(
-            target=lambda: q.put(de.compare_files(lp, rp, options)),
-            daemon=True).start()
+        thread = CompareThread(entry.left_path, entry.right_path, self._options())
+        thread.setParent(win)
+        thread.finished.connect(thread.deleteLater)
 
-        def poll():
-            try:
-                result = q.get_nowait()
-            except queue.Empty:
-                if win.winfo_exists():
-                    self.after(60, poll)
-                return
-            if win.winfo_exists():
-                if result.is_binary:
-                    view.status.configure(
-                        text="Binary files are identical" if result.identical
-                        else "Binary files differ")
-                elif result.error:
-                    view.status.configure(text=result.error)
-                else:
-                    view.show_result(result)
+        def on_done(kind, result, w=win):
+            if kind == "file" and not result.error and not result.is_binary:
+                w.table.show_result(result)
+                s = result.summary
+                parts = [f"{s.get(k, 0)} {k}" for k in
+                         (de.CHANGED, de.ADDED, de.REMOVED) if s.get(k)]
+                w.status.setText(
+                    "Files are identical" if result.identical
+                    else "Differences: " + ", ".join(parts))
+            elif kind == "file" and result.is_binary:
+                w.status.setText("Binary files are identical" if result.identical
+                                 else "Binary files differ")
+            else:
+                w.status.setText(getattr(result, "error", None) or "Error")
 
-        self.after(60, poll)
+        thread.done.connect(on_done)
+        thread.start()
+
+
+def main():
+    app = QApplication(sys.argv)
+    app.setApplicationName("Files Comparison")
+    app.setStyleSheet(QSS)
+    if ICON_PATH.exists():
+        app.setWindowIcon(QIcon(str(ICON_PATH)))
+    win = MainWindow()
+    win.showMaximized()
+    sys.exit(app.exec())
 
 
 if __name__ == "__main__":
-    CompareApp().mainloop()
+    main()

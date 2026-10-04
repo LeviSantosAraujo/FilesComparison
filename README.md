@@ -1,11 +1,12 @@
 # Files Comparison
 
 A WinMerge-style file and folder comparison tool for macOS/Linux/Windows,
-built on tkinter — no dependencies.
+with a modern Qt (PySide6) interface.
 
-## Run
+## Setup
 
 ```
+pip3 install -r requirements.txt   # PySide6
 python3 app.py
 ```
 
