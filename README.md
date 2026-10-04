@@ -7,8 +7,18 @@ with a modern Qt (PySide6) interface.
 
 ```
 pip3 install -r requirements.txt   # PySide6
-python3 app.py
 ```
+
+Start it either way:
+
+```
+python3 app.py      # foreground (blocks the terminal)
+./start.command     # background, detached — or double-click it in Finder
+```
+
+`start.command` launches the app with `nohup` and returns immediately; it
+also refuses to start a second copy if one is already running. Output is
+appended to `files_comparison.log`.
 
 ## Usage
 
@@ -22,7 +32,9 @@ python3 app.py
      panes scroll together.
    - Two folders → a tree listing every item as *Identical*, *Different*,
      *Left only*, *Right only*, or *Binary differ*.
-     Double-click a "Different" file to open its side-by-side diff.
+     Files with near-identical names on opposite sides (e.g. `doc copy`
+     vs `doc cop`) are paired automatically and shown as `nameA ↔ nameB`.
+     Double-click any file row to open its side-by-side diff.
 
 ## Options
 
