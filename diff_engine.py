@@ -33,6 +33,13 @@ _BINARY_CHUNK = 8192
 IGNORED_NAMES = frozenset({".DS_Store", "__pycache__", ".git", ".hg", ".svn"})
 
 
+def _is_ignored(name: str) -> bool:
+    # ~$* are Office lock/owner temp files; ._* are macOS AppleDouble files
+    return (name in IGNORED_NAMES
+            or name.startswith("~$")
+            or name.startswith("._"))
+
+
 @dataclass
 class DiffOptions:
     ignore_whitespace: bool = False
@@ -439,13 +446,15 @@ def _scan(root: Path, recursive: bool) -> dict[str, Path]:
     result: dict[str, Path] = {}
     if recursive:
         for dirpath, dirnames, filenames in os.walk(root):
-            dirnames[:] = [d for d in dirnames if d not in IGNORED_NAMES]
+            dirnames[:] = [d for d in dirnames if not _is_ignored(d)]
             for name in dirnames + filenames:
+                if _is_ignored(name):
+                    continue
                 p = Path(dirpath) / name
                 result[p.relative_to(root).as_posix()] = p
     else:
         for p in root.iterdir():
-            if p.name not in IGNORED_NAMES:
+            if not _is_ignored(p.name):
                 result[p.name] = p
     return result
 

@@ -231,6 +231,15 @@ class TestCompareDirs(unittest.TestCase):
         statuses = self._statuses(de.compare_dirs(self.left, self.right))
         self.assertEqual(statuses["sub"], de.TYPE_MISMATCH)
 
+    def test_temp_files_ignored(self):
+        (self.left / "~$lock.docx").write_text("x")
+        (self.left / "._apple.txt").write_text("x")
+        (self.left / ".DS_Store").write_text("x")
+        statuses = self._statuses(de.compare_dirs(self.left, self.right))
+        self.assertNotIn("~$lock.docx", statuses)
+        self.assertNotIn("._apple.txt", statuses)
+        self.assertNotIn(".DS_Store", statuses)
+
     def test_binary_files(self):
         (self.left / "a.bin").write_bytes(b"\x00\x01")
         (self.right / "a.bin").write_bytes(b"\x00\x02")

@@ -1,10 +1,11 @@
 """Generate icon.png for Files Comparison — pure stdlib, no dependencies.
 
-Design: dark rounded tile with two clean "pane" columns; the left shows a
-removed (red) line, the right an added (green) line.
+Design: a dark rounded tile holding a light document page (folded corner,
+a few text lines) with a magnifying glass over it — "a file being searched".
 Run: python3 tools/make_icon.py
 """
 
+import math
 import struct
 import zlib
 from pathlib import Path
@@ -12,11 +13,11 @@ from pathlib import Path
 SIZE = 64
 RADIUS = 14
 
-BG = (31, 35, 46, 255)          # dark slate
-PANE = (238, 241, 246, 255)     # light pane
-ADDED = (63, 185, 110, 255)
-REMOVED = (238, 100, 100, 255)
-MUTED = (160, 170, 185, 255)
+BG = (31, 35, 46, 255)          # dark slate tile
+PANE = (240, 243, 248, 255)     # document page
+FOLD = (190, 198, 212, 255)     # folded corner
+MUTED = (150, 160, 175, 255)    # text lines
+GLASS = (47, 109, 246, 255)     # magnifier (accent blue)
 
 
 def write_png(path: Path, w: int, h: int, pixels):
@@ -49,32 +50,49 @@ def in_rounded(x, y, x0, y0, x1, y1, r):
     return all((x - cx) ** 2 + (y - cy) ** 2 <= r * r for cx, cy in corners)
 
 
+def _seg_dist(x, y, x0, y0, x1, y1):
+    """Distance from point to segment."""
+    dx, dy = x1 - x0, y1 - y0
+    if dx == dy == 0:
+        return math.hypot(x - x0, y - y0)
+    t = max(0.0, min(1.0, ((x - x0) * dx + (y - y0) * dy) / (dx * dx + dy * dy)))
+    return math.hypot(x - (x0 + t * dx), y - (y0 + t * dy))
+
+
 def main():
     px = [[(0, 0, 0, 0)] * SIZE for _ in range(SIZE)]
 
-    def rect(x0, y0, x1, y1, color, radius=0):
-        for y in range(y0, y1 + 1):
-            for x in range(x0, x1 + 1):
-                if in_rounded(x, y, x0, y0, x1, y1, radius):
+    def paint(color, pred):
+        for y in range(SIZE):
+            for x in range(SIZE):
+                if pred(x, y):
                     px[y][x] = color
 
     # tile
-    for y in range(SIZE):
-        for x in range(SIZE):
-            if in_rounded(x, y, 0, 0, SIZE - 1, SIZE - 1, RADIUS):
-                px[y][x] = BG
+    paint(BG, lambda x, y: in_rounded(x, y, 0, 0, SIZE - 1, SIZE - 1, RADIUS))
 
-    # two light panes
-    rect(10, 14, 29, 50, PANE, radius=4)
-    rect(35, 14, 54, 50, PANE, radius=4)
+    # document page with the top-right corner folded over
+    fold = 9
+    in_fold = lambda x, y: (x >= 44 - fold and y <= 8 + fold and x <= 44
+                            and y >= 8
+                            and (x - (44 - fold)) + (8 + fold - y) <= fold)
+    paint(PANE, lambda x, y:
+          in_rounded(x, y, 14, 8, 44, 50, 3) and not in_fold(x, y))
+    paint(FOLD, in_fold)
+    # text lines on the page
+    paint(MUTED, lambda x, y:
+          18 <= x <= 36 and ((18 <= y <= 20) or (24 <= y <= 26) or (30 <= y <= 32)))
+    paint(MUTED, lambda x, y: 18 <= x <= 30 and 36 <= y <= 38)
 
-    # left pane: muted line + removed line
-    rect(14, 20, 25, 23, MUTED, radius=1)
-    rect(14, 30, 25, 33, REMOVED, radius=1)
-
-    # right pane: muted line + added line
-    rect(39, 20, 50, 23, MUTED, radius=1)
-    rect(39, 30, 50, 33, ADDED, radius=1)
+    # magnifying glass over the page's lower-right
+    cx, cy, r_out, r_in = 39, 37, 12, 8.5
+    paint(GLASS, lambda x, y:
+          r_in <= math.hypot(x - cx, y - cy) <= r_out)
+    # lens interior: subtle tint
+    paint((120, 160, 250, 160), lambda x, y: math.hypot(x - cx, y - cy) < r_in)
+    # handle
+    hx0, hy0 = cx + r_out - 3, cy + r_out - 3
+    paint(GLASS, lambda x, y: _seg_dist(x, y, hx0, hy0, 55, 55) <= 3)
 
     out = Path(__file__).resolve().parent.parent / "icon.png"
     write_png(out, SIZE, SIZE, px)

@@ -281,7 +281,7 @@ class FolderTree(QTreeWidget):
         entry = item.data(0, Qt.ItemDataRole.UserRole)
         log.info("tree double-click: %r", entry)
         if (entry and not entry.is_dir
-                and entry.left_path and entry.right_path):
+                and (entry.left_path or entry.right_path)):
             self.file_activated.emit(entry)
 
 
@@ -484,11 +484,51 @@ class MainWindow(QMainWindow):
         self.diff_table.show_result(result)
         self.stack.setCurrentIndex(1)
 
+    def _single_side_result(self, entry: de.DirEntry) -> de.FileResult:
+        """Pseudo FileResult for a file that exists on only one side."""
+        p = entry.left_path or entry.right_path
+        result = de.FileResult(p, p)
+        doc = de.extract_document_lines(p)
+        if doc is not None:
+            lines, _ = doc
+            result.note = "only in " + ("left" if entry.left_path else "right")
+        elif de.is_binary(p):
+            result.is_binary = True
+            return result
+        else:
+            try:
+                lines = de.read_lines(p)
+            except OSError as e:
+                result.error = str(e)
+                return result
+            result.note = "only in " + ("left" if entry.left_path else "right")
+        result.rows = [
+            de.DiffRow(de.SideLine(i + 1, l, de.EQUAL), None)
+            if entry.left_path else
+            de.DiffRow(None, de.SideLine(i + 1, l, de.EQUAL))
+            for i, l in enumerate(lines)]
+        return result
+
     def _open_file_diff(self, entry: de.DirEntry):
-        win = DiffWindow(f"{entry.left_path.name} ↔ {entry.right_path.name}")
+        side = entry.left_path or entry.right_path
+        other = entry.right_path if entry.left_path else entry.left_path
+        title = side.name if other is None else f"{entry.left_path.name} ↔ {entry.right_path.name}"
+        win = DiffWindow(title)
         win.resize(1200, 800)
         win.show()
         self._diff_windows.append(win)  # keep a reference alive
+
+        if entry.left_path is None or entry.right_path is None:
+            result = self._single_side_result(entry)
+            if result.is_binary:
+                win.status.setText("Binary file — exists on one side only")
+            elif result.error:
+                win.status.setText(result.error)
+            else:
+                win.table.show_result(result)
+                win.status.setText(
+                    result.note + " — " + f"{len(result.rows)} lines")
+            return
 
         thread = CompareThread(entry.left_path, entry.right_path, self._options())
         thread.setParent(win)
