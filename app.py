@@ -212,11 +212,22 @@ class DiffTable(QTableWidget):
         self.scrollToTop()
 
 
+def _stop_thread(t: "CompareThread | None"):
+    """Wait briefly for a worker to finish; terminate if it is stuck."""
+    if t and t.isRunning():
+        t.wait(3000)
+        if t.isRunning():
+            t.terminate()
+            t.wait(2000)
+
+
 class DiffWindow(QMainWindow):
     """Standalone window showing one file comparison."""
 
     def __init__(self, title: str):
         super().__init__()
+        self.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose)
+        self._worker: CompareThread | None = None
         self.setWindowTitle(title)
         if ICON_PATH.exists():
             self.setWindowIcon(QIcon(str(ICON_PATH)))
@@ -229,6 +240,10 @@ class DiffWindow(QMainWindow):
         self.status.setObjectName("status")
         lay.addWidget(self.status)
         self.setCentralWidget(central)
+
+    def closeEvent(self, event):
+        _stop_thread(self._worker)
+        super().closeEvent(event)
 
 
 class FolderTree(QTreeWidget):
@@ -519,6 +534,9 @@ class MainWindow(QMainWindow):
         win.resize(1200, 800)
         win.show()
         self._diff_windows.append(win)  # keep a reference alive
+        win.destroyed.connect(
+            lambda _o=None, w=win: self._diff_windows.remove(w)
+            if w in self._diff_windows else None)
 
         if entry.left_path is None or entry.right_path is None:
             result = self._single_side_result(entry)
@@ -533,6 +551,7 @@ class MainWindow(QMainWindow):
             return
 
         thread = CompareThread(entry.left_path, entry.right_path, self._options())
+        win._worker = thread
         thread.setParent(win)
         thread.finished.connect(thread.deleteLater)
 
@@ -554,10 +573,19 @@ class MainWindow(QMainWindow):
         thread.done.connect(on_done)
         thread.start()
 
+    def closeEvent(self, event):
+        # Closing the main window ends the whole app: kill diff windows
+        # and any running comparison so the process cannot linger.
+        for w in list(self._diff_windows):
+            w.close()
+        _stop_thread(self._worker)
+        super().closeEvent(event)
+
 
 def main():
     app = QApplication(sys.argv)
     app.setApplicationName("Files Comparison")
+    app.setQuitOnLastWindowClosed(True)
     app.setStyleSheet(QSS)
     if ICON_PATH.exists():
         app.setWindowIcon(QIcon(str(ICON_PATH)))
