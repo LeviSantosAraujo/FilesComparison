@@ -31,14 +31,18 @@ The **Files / Folders** and **Text** buttons in the header pick the mode:
   **File…** or **Folder…** buttons (you can also type or paste a path).
   The comparison runs automatically as soon as both sides are filled;
   press **Compare** to re-run it.
-- **Text** — each panel becomes a paste area; type or paste text on both
-  sides and the diff updates live as you type.
+- **Text** — the whole window becomes two full-height editable panes,
+  left and right. Paste or type directly into them; differences are
+  highlighted inline per line and re-diff live as you type.
 
 Results:
-- Two files / two texts → side-by-side diff with changed (amber), added
+- Two files → side-by-side diff table with changed (amber), added
   (green), and removed (red) rows. Line numbers in gray gutters; both
   panes scroll together. Related lines are aligned globally, so a revised
   paragraph on the left sits next to its counterpart on the right.
+- Two texts → the same diff, highlighted inline inside the editable
+  panes themselves (removed lines tint left, added lines tint right,
+  changed lines tint both).
 - Two folders → a tree listing every item as *Identical*, *Different*,
   *Left only*, *Right only*, *Type mismatch*, or *Binary differ*.
    - Files with near-identical names on opposite sides (e.g. `doc copy`
