@@ -10,12 +10,13 @@ import sys
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QThread, QTimer, Signal
-from PySide6.QtGui import QColor, QFont, QIcon
+from PySide6.QtGui import QColor, QFont, QIcon, QTextCursor, QTextFormat
 from PySide6.QtWidgets import (
     QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QFileDialog,
     QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
-    QPlainTextEdit, QPushButton, QStackedWidget, QTableWidget,
-    QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+    QPlainTextEdit, QPushButton, QSplitter, QStackedWidget, QTableWidget,
+    QTableWidgetItem, QTextEdit, QTreeWidget, QTreeWidgetItem,
+    QVBoxLayout, QWidget)
 
 import diff_engine as de
 
@@ -318,7 +319,7 @@ class FolderTree(QTreeWidget):
 
 
 class SidePanel(QWidget):
-    """Half-width card: title plus either a path row or a paste-text area."""
+    """Half-width card: title, path field, File…/Folder… buttons."""
 
     def __init__(self, title: str, edit: QLineEdit,
                  on_file, on_folder):
@@ -332,11 +333,7 @@ class SidePanel(QWidget):
         title_lbl = QLabel(title)
         title_lbl.setObjectName("panelTitle")
         lay.addWidget(title_lbl)
-
-        self.stack = QStackedWidget()
-        path_page = QWidget()
-        row = QHBoxLayout(path_page)
-        row.setContentsMargins(0, 0, 0, 0)
+        row = QHBoxLayout()
         row.setSpacing(6)
         row.addWidget(edit, stretch=1)
         file_btn = QPushButton("File…")
@@ -345,17 +342,64 @@ class SidePanel(QWidget):
         folder_btn.clicked.connect(on_folder)
         row.addWidget(file_btn)
         row.addWidget(folder_btn)
-        self.stack.addWidget(path_page)      # 0 — pick a file/folder
+        lay.addLayout(row)
 
-        self.text_edit = QPlainTextEdit()
-        self.text_edit.setPlaceholderText("Paste or type text here…")
-        self.text_edit.setFont(mono_font())
-        self.text_edit.setMinimumHeight(130)
-        self.stack.addWidget(self.text_edit)  # 1 — paste text
-        lay.addWidget(self.stack)
 
-    def set_text_mode(self, on: bool):
-        self.stack.setCurrentIndex(1 if on else 0)
+class TextDiffPage(QWidget):
+    """Full-height side-by-side editable panes for text-vs-text compare.
+
+    Differences are highlighted inline per line: removed/changed rows tint
+    the left pane (red/amber), added/changed tint the right (green/amber).
+    """
+
+    def __init__(self):
+        super().__init__()
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(0, 0, 0, 0)
+        lay.setSpacing(0)
+        split = QSplitter(Qt.Orientation.Horizontal)
+        self.left = self._make_pane("LEFT")
+        self.right = self._make_pane("RIGHT")
+        split.addWidget(self.left)
+        split.addWidget(self.right)
+        lay.addWidget(split)
+
+    def _make_pane(self, title: str) -> QPlainTextEdit:
+        edit = QPlainTextEdit()
+        edit.setPlaceholderText(f"Paste or type text for {title}…")
+        edit.setFont(mono_font())
+        edit.setLineWrapMode(QPlainTextEdit.LineWrapMode.NoWrap)
+        return edit
+
+    def texts(self) -> tuple[str, str]:
+        return self.left.toPlainText(), self.right.toPlainText()
+
+    def clear_marks(self):
+        self.left.setExtraSelections([])
+        self.right.setExtraSelections([])
+
+    def apply_marks(self, rows: list[de.DiffRow]):
+        self._mark(self.left, rows, 0)
+        self._mark(self.right, rows, 1)
+
+    @staticmethod
+    def _mark(edit: QPlainTextEdit, rows: list[de.DiffRow], side: int):
+        sels = []
+        doc = edit.document()
+        for row in rows:
+            s = row.left if side == 0 else row.right
+            if s is None or s.kind == de.EQUAL:
+                continue
+            block = doc.findBlockByNumber(s.lineno - 1)
+            if not block.isValid():
+                continue
+            sel = QTextEdit.ExtraSelection()
+            sel.format.setBackground(QColor(ROW_COLORS[s.kind]))
+            sel.format.setProperty(QTextFormat.Property.FullWidthSelection,
+                                   True)
+            sel.cursor = QTextCursor(block)
+            sels.append(sel)
+        edit.setExtraSelections(sels)
 
 
 class MainWindow(QMainWindow):
@@ -410,7 +454,9 @@ class MainWindow(QMainWindow):
         panels.setSpacing(8)
         panels.addWidget(self.left_panel)
         panels.addWidget(self.right_panel)
-        root.addLayout(panels)
+        self.panels_holder = QWidget()
+        self.panels_holder.setLayout(panels)
+        root.addWidget(self.panels_holder)
 
         opts = QHBoxLayout()
         opts.setSpacing(14)
@@ -450,6 +496,8 @@ class MainWindow(QMainWindow):
         self.binary_lbl = QLabel(alignment=Qt.AlignmentFlag.AlignCenter)
         self.binary_lbl.setObjectName("tagline")
         self.stack.addWidget(self.binary_lbl)                        # 3
+        self.text_page = TextDiffPage()
+        self.stack.addWidget(self.text_page)                         # 4
         root.addWidget(self.stack, stretch=1)
 
         self.status = QLabel()
@@ -462,8 +510,8 @@ class MainWindow(QMainWindow):
         # live re-diff while typing in text mode
         self._text_timer = QTimer(self, singleShot=True, interval=400)
         self._text_timer.timeout.connect(self.compare)
-        self.left_panel.text_edit.textChanged.connect(self._text_timer.start)
-        self.right_panel.text_edit.textChanged.connect(self._text_timer.start)
+        self.text_page.left.textChanged.connect(self._text_timer.start)
+        self.text_page.right.textChanged.connect(self._text_timer.start)
 
     # -- actions -----------------------------------------------------------
 
@@ -471,42 +519,31 @@ class MainWindow(QMainWindow):
         self._mode = mode
         text_mode = mode == "text"
         log.info("mode: %s", mode)
-        self.left_panel.set_text_mode(text_mode)
-        self.right_panel.set_text_mode(text_mode)
+        self.panels_holder.setVisible(not text_mode)
         self.opt_recursive.setEnabled(not text_mode)
-        self.hint.setText(
-            "Paste or type text on each side — the diff updates as you type."
-            if text_mode else
-            "Pick a file or folder on each side above — "
-            "the comparison runs automatically.")
-        self.stack.setCurrentIndex(0)
+        self.stack.setCurrentIndex(4 if text_mode else 0)
         self.status.setText("")
         if text_mode:
             self._compare_text()
 
     def _compare_text(self):
-        lt = self.left_panel.text_edit.toPlainText()
-        rt = self.right_panel.text_edit.toPlainText()
+        lt, rt = self.text_page.texts()
         if not lt and not rt:
-            self.stack.setCurrentIndex(0)
+            self.text_page.clear_marks()
             self.status.setText("")
             return
         rows = de.diff_lines(lt.splitlines(), rt.splitlines(),
                              self._options())
-        result = de.FileResult(Path("(left text)"), Path("(right text)"))
-        result.note = "pasted text"
-        result.rows = rows
+        identical = not any(de._row_is_diff(r) for r in rows)
+        self.text_page.apply_marks(rows)
+        counts: dict[str, int] = {}
         for row in rows:
             for kind in {s.kind for s in (row.left, row.right)
                          if s and s.kind != de.EQUAL}:
-                result.summary[kind] = result.summary.get(kind, 0) + 1
-        result.identical = not any(de._row_is_diff(r) for r in rows)
-        self.diff_table.show_result(result)
-        self.stack.setCurrentIndex(1)
-        s = result.summary
-        parts = [f"{s.get(k, 0)} {k}" for k in
-                 (de.CHANGED, de.ADDED, de.REMOVED) if s.get(k)]
-        self.status.setText("Texts are identical" if result.identical
+                counts[kind] = counts.get(kind, 0) + 1
+        parts = [f"{counts.get(k, 0)} {k}" for k in
+                 (de.CHANGED, de.ADDED, de.REMOVED) if counts.get(k)]
+        self.status.setText("Texts are identical" if identical
                             else "Differences: " + ", ".join(parts))
 
     def _options(self) -> de.DiffOptions:
