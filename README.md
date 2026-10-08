@@ -25,16 +25,22 @@ whole app down — no process is left behind.
 
 ## Usage
 
-1. Fill the **LEFT** and **RIGHT** panels — either two files or two
-   folders — using the **File…** or **Folder…** buttons (you can also type
-   or paste a path). The comparison runs automatically as soon as both
-   sides are filled; press **Compare** to re-run it.
-2. Two files → side-by-side diff with changed (amber), added (green),
-   and removed (red) rows. Line numbers in gray gutters; both panes
-   scroll together. Related lines are aligned globally, so a revised
-   paragraph on the left sits next to its counterpart on the right.
-3. Two folders → a tree listing every item as *Identical*, *Different*,
-   *Left only*, *Right only*, *Type mismatch*, or *Binary differ*.
+The **Files / Folders** and **Text** buttons in the header pick the mode:
+
+- **Files / Folders** — fill the LEFT and RIGHT panels using the
+  **File…** or **Folder…** buttons (you can also type or paste a path).
+  The comparison runs automatically as soon as both sides are filled;
+  press **Compare** to re-run it.
+- **Text** — each panel becomes a paste area; type or paste text on both
+  sides and the diff updates live as you type.
+
+Results:
+- Two files / two texts → side-by-side diff with changed (amber), added
+  (green), and removed (red) rows. Line numbers in gray gutters; both
+  panes scroll together. Related lines are aligned globally, so a revised
+  paragraph on the left sits next to its counterpart on the right.
+- Two folders → a tree listing every item as *Identical*, *Different*,
+  *Left only*, *Right only*, *Type mismatch*, or *Binary differ*.
    - Files with near-identical names on opposite sides (e.g. `doc copy`
      vs `doc cop`) are paired automatically and shown as `nameA ↔ nameB`.
    - Double-click any file row to open its side-by-side diff — including

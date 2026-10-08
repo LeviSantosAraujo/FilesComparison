@@ -9,13 +9,13 @@ import logging
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QThread, Signal
+from PySide6.QtCore import Qt, QThread, QTimer, Signal
 from PySide6.QtGui import QColor, QFont, QIcon
 from PySide6.QtWidgets import (
-    QAbstractItemView, QApplication, QCheckBox, QFileDialog, QHBoxLayout,
-    QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton,
-    QStackedWidget, QTableWidget, QTableWidgetItem, QTreeWidget,
-    QTreeWidgetItem, QVBoxLayout, QWidget)
+    QAbstractItemView, QApplication, QButtonGroup, QCheckBox, QFileDialog,
+    QHBoxLayout, QHeaderView, QLabel, QLineEdit, QMainWindow, QMessageBox,
+    QPlainTextEdit, QPushButton, QStackedWidget, QTableWidget,
+    QTableWidgetItem, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 import diff_engine as de
 
@@ -111,6 +111,21 @@ QPushButton#accent:hover {{ background: {ACCENT_DK}; }}
 QPushButton#accent:pressed {{ background: {ACCENT_DK}; }}
 QPushButton#accent:disabled {{ background: #9db8f5; }}
 QCheckBox {{ spacing: 6px; }}
+QPushButton#seg {{ padding: 5px 14px; font-size: 12px; }}
+QPushButton#seg:checked {{
+    background: {ACCENT};
+    border-color: {ACCENT};
+    color: white;
+    font-weight: bold;
+}}
+QPlainTextEdit {{
+    background: {CARD};
+    border: 1px solid {BORDER};
+    border-radius: 6px;
+    padding: 6px;
+    selection-background-color: #b9d2fb;
+}}
+QPlainTextEdit:focus {{ border-color: {ACCENT}; }}
 QTableWidget, QTreeWidget {{
     background: {CARD};
     border: 1px solid {BORDER};
@@ -303,7 +318,7 @@ class FolderTree(QTreeWidget):
 
 
 class SidePanel(QWidget):
-    """Half-width card: title, path field, File…/Folder… buttons."""
+    """Half-width card: title plus either a path row or a paste-text area."""
 
     def __init__(self, title: str, edit: QLineEdit,
                  on_file, on_folder):
@@ -317,7 +332,11 @@ class SidePanel(QWidget):
         title_lbl = QLabel(title)
         title_lbl.setObjectName("panelTitle")
         lay.addWidget(title_lbl)
-        row = QHBoxLayout()
+
+        self.stack = QStackedWidget()
+        path_page = QWidget()
+        row = QHBoxLayout(path_page)
+        row.setContentsMargins(0, 0, 0, 0)
         row.setSpacing(6)
         row.addWidget(edit, stretch=1)
         file_btn = QPushButton("File…")
@@ -326,7 +345,17 @@ class SidePanel(QWidget):
         folder_btn.clicked.connect(on_folder)
         row.addWidget(file_btn)
         row.addWidget(folder_btn)
-        lay.addLayout(row)
+        self.stack.addWidget(path_page)      # 0 — pick a file/folder
+
+        self.text_edit = QPlainTextEdit()
+        self.text_edit.setPlaceholderText("Paste or type text here…")
+        self.text_edit.setFont(mono_font())
+        self.text_edit.setMinimumHeight(130)
+        self.stack.addWidget(self.text_edit)  # 1 — paste text
+        lay.addWidget(self.stack)
+
+    def set_text_mode(self, on: bool):
+        self.stack.setCurrentIndex(1 if on else 0)
 
 
 class MainWindow(QMainWindow):
@@ -351,20 +380,36 @@ class MainWindow(QMainWindow):
         brand_row.addWidget(brand)
         brand_row.addWidget(tagline)
         brand_row.addStretch()
+        self._mode = "files"
+        self.mode_files = QPushButton("Files / Folders")
+        self.mode_text = QPushButton("Text")
+        mode_group = QButtonGroup(self)
+        mode_group.setExclusive(True)
+        for btn, mode in ((self.mode_files, "files"), (self.mode_text, "text")):
+            btn.setObjectName("seg")
+            btn.setCheckable(True)
+            mode_group.addButton(btn)
+            btn.clicked.connect(lambda _c, m=mode: self._set_mode(m))
+            brand_row.addWidget(btn)
+        self.mode_files.setChecked(True)
         root.addLayout(brand_row)
 
         self.left_edit = QLineEdit()
         self.right_edit = QLineEdit()
         self.left_edit.setPlaceholderText("Path to left file or folder")
         self.right_edit.setPlaceholderText("Path to right file or folder")
+        self.left_panel = SidePanel(
+            "LEFT", self.left_edit,
+            lambda: self._pick(self.left_edit, False),
+            lambda: self._pick(self.left_edit, True))
+        self.right_panel = SidePanel(
+            "RIGHT", self.right_edit,
+            lambda: self._pick(self.right_edit, False),
+            lambda: self._pick(self.right_edit, True))
         panels = QHBoxLayout()
         panels.setSpacing(8)
-        panels.addWidget(SidePanel("LEFT", self.left_edit,
-                                   lambda: self._pick(self.left_edit, False),
-                                   lambda: self._pick(self.left_edit, True)))
-        panels.addWidget(SidePanel("RIGHT", self.right_edit,
-                                   lambda: self._pick(self.right_edit, False),
-                                   lambda: self._pick(self.right_edit, True)))
+        panels.addWidget(self.left_panel)
+        panels.addWidget(self.right_panel)
         root.addLayout(panels)
 
         opts = QHBoxLayout()
@@ -384,11 +429,11 @@ class MainWindow(QMainWindow):
         root.addLayout(opts)
 
         self.stack = QStackedWidget()
-        hint = QLabel("Pick a file or folder on each side above — "
-                      "the comparison runs automatically.")
-        hint.setObjectName("tagline")
-        hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.stack.addWidget(hint)                                   # 0
+        self.hint = QLabel("Pick a file or folder on each side above — "
+                           "the comparison runs automatically.")
+        self.hint.setObjectName("tagline")
+        self.hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.stack.addWidget(self.hint)                              # 0
         self.diff_table = DiffTable()
         self.stack.addWidget(self.diff_table)                        # 1
         folder_page = QWidget()
@@ -414,7 +459,55 @@ class MainWindow(QMainWindow):
         self.setCentralWidget(central)
         log.info("app init: PySide6 %s", __import__("PySide6").__version__)
 
+        # live re-diff while typing in text mode
+        self._text_timer = QTimer(self, singleShot=True, interval=400)
+        self._text_timer.timeout.connect(self.compare)
+        self.left_panel.text_edit.textChanged.connect(self._text_timer.start)
+        self.right_panel.text_edit.textChanged.connect(self._text_timer.start)
+
     # -- actions -----------------------------------------------------------
+
+    def _set_mode(self, mode: str):
+        self._mode = mode
+        text_mode = mode == "text"
+        log.info("mode: %s", mode)
+        self.left_panel.set_text_mode(text_mode)
+        self.right_panel.set_text_mode(text_mode)
+        self.opt_recursive.setEnabled(not text_mode)
+        self.hint.setText(
+            "Paste or type text on each side — the diff updates as you type."
+            if text_mode else
+            "Pick a file or folder on each side above — "
+            "the comparison runs automatically.")
+        self.stack.setCurrentIndex(0)
+        self.status.setText("")
+        if text_mode:
+            self._compare_text()
+
+    def _compare_text(self):
+        lt = self.left_panel.text_edit.toPlainText()
+        rt = self.right_panel.text_edit.toPlainText()
+        if not lt and not rt:
+            self.stack.setCurrentIndex(0)
+            self.status.setText("")
+            return
+        rows = de.diff_lines(lt.splitlines(), rt.splitlines(),
+                             self._options())
+        result = de.FileResult(Path("(left text)"), Path("(right text)"))
+        result.note = "pasted text"
+        result.rows = rows
+        for row in rows:
+            for kind in {s.kind for s in (row.left, row.right)
+                         if s and s.kind != de.EQUAL}:
+                result.summary[kind] = result.summary.get(kind, 0) + 1
+        result.identical = not any(de._row_is_diff(r) for r in rows)
+        self.diff_table.show_result(result)
+        self.stack.setCurrentIndex(1)
+        s = result.summary
+        parts = [f"{s.get(k, 0)} {k}" for k in
+                 (de.CHANGED, de.ADDED, de.REMOVED) if s.get(k)]
+        self.status.setText("Texts are identical" if result.identical
+                            else "Differences: " + ", ".join(parts))
 
     def _options(self) -> de.DiffOptions:
         return de.DiffOptions(
@@ -440,6 +533,9 @@ class MainWindow(QMainWindow):
             self.compare()
 
     def compare(self):
+        if self._mode == "text":
+            self._compare_text()
+            return
         left = Path(self.left_edit.text().strip())
         right = Path(self.right_edit.text().strip())
         log.info("compare: left=%s right=%s", left, right)

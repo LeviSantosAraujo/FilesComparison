@@ -1,0 +1,13 @@
+{
+	"folders": [
+		{
+			"name": "Files Comparison",
+			"path": "."
+		}
+	],
+	"settings": {},
+	"workbenchMode": "windsurf-agent-window",
+	"agentSourceFolders": [
+		"file:///Users/levisantosaraujo/Downloads/Python/Files%20Comparison"
+	]
+}
